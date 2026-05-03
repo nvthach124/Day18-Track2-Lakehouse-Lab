@@ -3,9 +3,15 @@
 Schema mirrors slide §6 medallion example: raw LLM API call logs.
 """
 import json
+import os
 import random
+import sys
 import uuid
 from datetime import datetime, timedelta, timezone
+
+# Make this script runnable both as `python /workspace/scripts/generate_data.py`
+# and via `python -m scripts.generate_data` from /workspace.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from pyspark.sql import Row
 

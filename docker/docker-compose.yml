@@ -11,27 +11,34 @@ services:
       MINIO_ROOT_PASSWORD: minioadmin
     volumes:
       - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   minio-init:
     image: minio/mc:latest
+    container_name: lakehouse-minio-init
     depends_on:
-      - minio
-    entrypoint: >
-      /bin/sh -c "
-      sleep 5;
-      mc alias set local http://minio:9000 minioadmin minioadmin;
-      mc mb -p local/lakehouse || true;
-      mc mb -p local/bronze || true;
-      mc mb -p local/silver || true;
-      mc mb -p local/gold || true;
-      exit 0;
-      "
+      minio:
+        condition: service_healthy
+    entrypoint:
+      - sh
+      - -c
+      - |
+        mc alias set local http://minio:9000 minioadmin minioadmin
+        for b in lakehouse bronze silver gold; do
+          mc mb --ignore-existing local/$$b
+        done
+        echo "Buckets ready: lakehouse, bronze, silver, gold"
 
   spark:
-    image: jupyter/pyspark-notebook:spark-3.5.0
+    image: quay.io/jupyter/pyspark-notebook:spark-3.5.0
     container_name: lakehouse-spark
     depends_on:
-      - minio
+      minio-init:
+        condition: service_completed_successfully
     ports:
       - "8888:8888"
       - "4040:4040"
@@ -40,14 +47,35 @@ services:
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
       AWS_REGION: us-east-1
+      PYTHONPATH: /workspace/scripts
     volumes:
       - ../:/workspace
+      # Ivy cache survives restarts → Maven JARs only download once
+      - ivy-cache:/home/jovyan/.ivy2
+      - ipython-cache:/home/jovyan/.cache
     working_dir: /workspace
-    command: >
-      bash -c "
-      pip install --quiet delta-spark==3.2.0 jupytext faker &&
-      start-notebook.sh --NotebookApp.token=lakehouse --NotebookApp.notebook_dir=/workspace
-      "
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        echo ">> Installing Python deps (cached after first run)…"
+        pip install --quiet --user \
+          delta-spark==3.2.0 \
+          jupytext==1.16.4 \
+          faker==30.3.0
+        echo ">> Auto-converting .py percent files to .ipynb (one-time per file)…"
+        cd /workspace/notebooks && for f in *.py; do
+          ipynb="${f%.py}.ipynb"
+          [ -f "$ipynb" ] || jupytext --to notebook "$f"
+        done
+        echo ">> Starting Jupyter (token: lakehouse)…"
+        cd /workspace
+        start-notebook.py \
+          --IdentityProvider.token=lakehouse \
+          --ServerApp.root_dir=/workspace
 
 volumes:
   minio-data:
+  ivy-cache:
+  ipython-cache:
